@@ -508,20 +508,26 @@ def main():
         watch_list(st, rooms)
         check(st, rooms)
         st["fails"] = 0
-    except Exception as e:  # noqa: BLE001  카톡 꺼짐·최소화·채팅 탭 아님 등
+        st.pop("fail_notified", None)
+    except Exception as e:  # noqa: BLE001  카톡 꺼짐·종료·채팅 탭 아님 등
         busy = "사용 중" in str(e)
         DEFER[0] = DEFER[0] or busy
-        if not busy:
+        if busy:                                           # 창은 정상으로 찾았다는 뜻 → 실패 횟수를 지운다 (미룸은 실패가 아님)
+            st["fails"] = 0
+            st.pop("fail_notified", None)
+            log(f"미룸: {e}")
+        else:
             st["fails"] = st.get("fails", 0) + 1
-        log(f'{"미룸" if busy else "감시 실패"} ({st.get("fails", 0)}회 연속): {e}')
-        if st.get("fails") == 3:                           # 3회 연속 실패하면 한 번 알린다
-            notify("오더방 감시가 멈춤", f"3회 연속 실패: {e}")
+            log(f'감시 실패 ({st["fails"]}회 연속): {e}')
+            if st["fails"] >= 3 and not st.get("fail_notified"):   # 3회 연속 실패하면 한 번만 알린다
+                notify("오더방 감시가 멈춤", f"3회 연속 실패: {e}")
+                st["fail_notified"] = NOW.isoformat(timespec="minutes")
         save_state(st)
-    if DEFER[0]:                                           # 이번 회차에 미뤘으면 시작 시각을 기록, 30분 넘게 계속 밀리면 한 번 알린다
+    if DEFER[0]:                                           # 이번 회차에 미뤘으면 시작 시각을 기록, 60분 넘게 계속 밀리면 한 번 알린다
         st.setdefault("busy_since", NOW.isoformat(timespec="minutes"))
         mins = int((NOW - dt.datetime.fromisoformat(st["busy_since"])).total_seconds() // 60)
-        if mins >= 30 and not st.get("busy_notified"):
-            notify("오더방 확인 밀림", f"{mins}분째 확인을 못 했습니다. 카톡 메인 창을 '전체' 탭에 두고 1분만 손을 떼 주세요.")
+        if mins >= 60 and not st.get("busy_notified"):
+            notify("오더방 확인 밀림", f"{mins}분째 확인을 못 했습니다. 카톡 검색창에 글자가 남아 있거나 전체·안읽음 탭이 아닌 탭을 보고 있는지 확인해 주세요.")
             st["busy_notified"] = NOW.isoformat(timespec="minutes")
     else:
         st.pop("busy_since", None); st.pop("busy_notified", None)

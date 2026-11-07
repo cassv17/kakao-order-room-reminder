@@ -22,7 +22,7 @@ $tmp = if ($KeepDir) { $KeepDir } else { Join-Path $env:TEMP ('odr_' + [guid]::N
 New-Item -ItemType Directory -Force $tmp | Out-Null
 $lines = New-Object System.Collections.Generic.List[string]
 Add-Type -AssemblyName System.Windows.Forms
-# 선택된 칩(검은 배경)을 찾는다: 전체 칩(맨 앞)이면 통과, 다른 칩이면 반전해 읽어 '오더방'일 때만 통과
+# 선택된 칩(검은 배경)을 찾는다: 전체(맨 앞)·안읽음(둘째)이면 통과, 다른 칩이면 반전해 읽어 '오더방'일 때만 통과
 function Assert-ChipTab([string]$png, [string]$dir) {
   $bmp = [Drawing.Bitmap]::FromFile($png)
   try {
@@ -34,13 +34,14 @@ function Assert-ChipTab([string]$png, [string]$dir) {
     $sel = @($cl | Where-Object { ($_[1] - $_[0]) -ge 40 }) | Select-Object -First 1
     if (-not $sel) { throw '메인 창 탭 줄을 읽지 못함 (선택된 칩이 안 보임)' }
     if ($sel[0] -le 125) { return }   # 전체
+    if ($sel[0] -ge 150 -and $sel[0] -le 215) { return }   # 안읽음(둘째 칩): 안 읽은 방만 보이지만 새 문의는 읽기 전이라 목록에 올라온다
     $w = $sel[1] - $sel[0] + 8
     $crop = New-Object Drawing.Bitmap $w, 36
     for ($i = 0; $i -lt $w; $i++) { for ($j = 0; $j -lt 36; $j++) { $c = $bmp.GetPixel([Math]::Min($bmp.Width - 1, $sel[0] - 4 + $i), 100 + $j); $crop.SetPixel($i, $j, [Drawing.Color]::FromArgb(255 - $c.R, 255 - $c.G, 255 - $c.B)) } }
     $cp = Join-Path $dir 'chip.png'; $crop.Save($cp); $crop.Dispose()
   } finally { $bmp.Dispose() }
   $txt = (Invoke-Ocr $cp | ForEach-Object { $_.Text }) -join ' '
-  if ($txt -notmatch '오더') { throw "사용 중: 메인 창이 전체·오더방 탭이 아님 (선택된 탭: $txt)" }
+  if ($txt -notmatch '오더') { throw "사용 중: 메인 창이 전체·안읽음·오더방 탭이 아님 (선택된 탭: $txt)" }
 }
 function Emit([string]$s) { $lines.Add($s) }
 function Hash([string]$p) { $b = [IO.File]::ReadAllBytes($p); [BitConverter]::ToString((New-Object Security.Cryptography.MD5CryptoServiceProvider).ComputeHash($b)) }
@@ -52,6 +53,10 @@ try {
       # 상시 감시: 메인 창을 화면 밖에서 넓고 길게 만들어 목록 위쪽 두 화면을 읽고 원래대로 돌려놓는다.
       # 칩(전체·오더방…)은 건드리지 않는다. 전체 탭이든 오더방 탭이든 새 글이 온 방이 위로 올라온다.
       Assert-NotBusy
+      # 사용자가 검색창에 글자를 입력해 둔 상태면 목록 대신 검색 결과가 보이고 탭 칩도 없다 → 실패가 아니라 '사용 중'
+      $lv0 = Get-ListView $main
+      $sb = @([KT]::Kids($lv0, 'Edit') | Where-Object { [KT]::GetParent($_) -eq $lv0 })
+      if ($sb.Count -eq 1 -and (([KT]::Txt($sb[0]) + [KT]::Get($sb[0])).Trim())) { throw '사용 중: 카톡 검색창에 글자가 있음' }
       Hold-Main $main
       [void](Hide-Win $main)
       $x = [System.Windows.Forms.SystemInformation]::VirtualScreen.Right + 200
