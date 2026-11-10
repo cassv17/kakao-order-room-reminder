@@ -239,7 +239,7 @@ def page_messages(lines, top, bottom):
 def scan_room(room, stop_date: dt.date, last_date: dt.date):
     """방을 읽어 날짜가 붙은 메시지 목록을 돌려준다(오래된 것부터)."""
     meta, pages = (0, 99999), {}
-    for line in run_ps("-Action", "scan", "-Title", room["title"], "-StopDate", stop_date.isoformat(), "-MaxPages", "14"):
+    for line in run_ps("-Action", "scan", "-Title", room["title"], "-StopDate", stop_date.isoformat(), "-MaxPages", "60"):
         if line.startswith("M\t"):
             _, a, b, _ = line.split("\t")
             meta = (int(a), int(b))

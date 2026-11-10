@@ -27,6 +27,18 @@ public class KT {
  [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WP p);
  public static int[] Normal(IntPtr h){ var p=new WP(); p.length=Marshal.SizeOf(typeof(WP)); GetWindowPlacement(h, ref p); return new int[]{p.L,p.T,p.R,p.B}; }
  public static void Place(IntPtr h, int show, int l, int t, int r, int b){ var p=new WP(); p.length=Marshal.SizeOf(typeof(WP)); GetWindowPlacement(h, ref p); p.showCmd=show; p.L=l; p.T=t; p.R=r; p.B=b; SetWindowPlacement(h, ref p); }
+ public static IntPtr WaitMove(uint pid, string title, long[] before, int timeoutMs, int x, out KR orig){
+   orig = new KR(); var sw = System.Diagnostics.Stopwatch.StartNew();
+   while (sw.ElapsedMilliseconds < timeoutMs) {
+     foreach (var h in Tops(pid)) {
+       if (Array.IndexOf(before, (long)h) >= 0 || Txt(h) != title) continue;
+       KR r; GetWindowRect(h, out r); orig = r;
+       SetWindowPos(h, IntPtr.Zero, x, 0, r.R - r.L, r.B - r.T, 0x0014);
+       return h;
+     }
+     System.Threading.Thread.Sleep(3);
+   }
+   return IntPtr.Zero; }
  public static void Click(IntPtr h, int x, int y){ IntPtr lp=(IntPtr)(((y&0xFFFF)<<16)|(x&0xFFFF)); PostMessage(h,0x0200,IntPtr.Zero,lp); System.Threading.Thread.Sleep(60); PostMessage(h,0x0201,(IntPtr)1,lp); System.Threading.Thread.Sleep(40); PostMessage(h,0x0202,IntPtr.Zero,lp); }
  public struct LII { public uint cb; public uint t; }
  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII i);
@@ -186,14 +198,13 @@ function Open-Room([string]$Title, [string]$TmpDir = $env:TEMP) {
     Remove-Item $shot -ErrorAction SilentlyContinue
     if ($best -and $bestSim -ge 0.7) { [KT]::DblClick($lc, 200, $best.Y - $oy + 8) }
     else { [KT]::Key($search, 0x28, 0x50); Start-Sleep -Milliseconds 250; [KT]::Key($search, 0x0D, 0x1C) }
-    # 창이 늦게 뜨는 경우가 있어 최대 8초 기다린다
-    $ok = @()
-    for ($i = 0; $i -lt 53 -and $ok.Count -eq 0; $i++) {
-      Start-Sleep -Milliseconds 150
-      $ok = @(Get-Tops | Where-Object { $before -notcontains [long]$_ -and [KT]::Txt($_) -ceq $Title })
-      if ($i % 5 -eq 4) { Restore-Focus }
-    }
-    if ($ok.Count -eq 1) { $orig = Hide-Win $ok[0] }   # 뜨자마자 화면 밖으로 옮겨 사용자 화면을 가리지 않게
+    # 창이 늦게 뜨는 경우가 있어 최대 8초 기다린다. 새 창이 생기는 순간(3ms 간격)에 바로 화면 밖으로 옮겨 사용자 화면에 보이지 않게 한다
+    Add-Type -AssemblyName System.Windows.Forms
+    $offx = [System.Windows.Forms.SystemInformation]::VirtualScreen.Right + 200
+    $orect = New-Object KR
+    $hw = [KT]::WaitMove($script:kpid, $Title, [long[]]$before, 8000, $offx, [ref]$orect)
+    $ok = if ($hw -ne [IntPtr]::Zero) { @($hw) } else { @() }
+    if ($ok.Count -eq 1) { $orig = $orect }
     Start-Sleep -Milliseconds 600
     Restore-Focus
   } finally { [void][KT]::SendMessage($search, 0x000C, [IntPtr]::Zero, '') }
@@ -224,9 +235,14 @@ function Close-Room($room) {
   $e = @([KT]::Kids($room.Win, 'RICHEDIT'))
   if ($e.Count -eq 1) { $t = [KT]::Get($e[0]); if ($t -and $t -cne '메시지 입력') { [void][KT]::SendMessage($e[0], 0x00B1, [IntPtr]0, [IntPtr](-1)); [void][KT]::SendMessage($e[0], 0x00C2, [IntPtr]1, '') } }
   $o = $room.Orig
-  if ($o) { [void][KT]::SetWindowPos($room.Win, [IntPtr]::Zero, $o.L, $o.T, ($o.R - $o.L), ($o.B - $o.T), 0x0014); Start-Sleep -Milliseconds 200 }
+  if ($o) {   # 숨긴 채로 원래 자리·크기로 되돌린다(카톡이 닫을 때의 창 위치를 기억하므로). 보이는 상태로 옮기면 화면에 잠깐 나타난다
+    [void][KT]::ShowWindow($room.Win, 0)
+    [void][KT]::SetWindowPos($room.Win, [IntPtr]::Zero, $o.L, $o.T, ($o.R - $o.L), ($o.B - $o.T), 0x0014)
+    Start-Sleep -Milliseconds 80
+  }
   # 닫기 요청이 늦게 처리되면 다음 단계가 이 창을 '사용자가 열어 둔 창'으로 착각하므로, 실제로 닫힐 때까지 기다린다
   for ($i = 0; $i -lt 3 -and [KT]::IsWindow($room.Win); $i++) {
+    if ($i -ge 1) { [void][KT]::ShowWindow($room.Win, 4) }   # 숨긴 창이 안 닫히면 보이게 한 뒤 다시 닫는다
     Close-Win $room.Win
     for ($j = 0; $j -lt 15 -and [KT]::IsWindow($room.Win); $j++) { Start-Sleep -Milliseconds 100 }
   }

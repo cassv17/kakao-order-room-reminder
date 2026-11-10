@@ -106,7 +106,7 @@ try {
       $wr = Get-Rect $win; $r = Get-Rect $lc
       $cx = [int](($r.L + $r.R) / 2); $cy = [int](($r.T + $r.B) / 2)
       $listH = $r.B - $r.T
-      $ticks = [Math]::Max(2, [int]($listH * 0.4 / 90))   # 한 번에 화면 40%만 올려 긴 글도 어느 한 화면에는 통째로 들어오게
+      $ticks = 1   # 한 칸(약 120px)씩만 올린다: 문의 글 하나가 500px 넘게 길 수 있어 큰 간격이면 어느 화면에도 통째로 안 들어오고, 날짜 구분선도 놓친다
       Emit "M`t$($r.T - $wr.T)`t$($r.B - $wr.T)`t$($room.OpenedHere)"
       [KT]::Wheel($lc, -120, 120, $cx, $cy); Start-Sleep -Milliseconds 700   # 맨 아래로
       $prev = $null
