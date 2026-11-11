@@ -267,6 +267,19 @@ def scan_room(room, stop_date: dt.date, last_date: dt.date):
     return msgs
 
 
+HQ_CONTACT = re.compile(r"유선|전화|연락|통화|문자|전달")
+NOT_NAME = {"레몬", "점장", "지점장", "실장", "팀장", "대표님", "본부장님", "점장님", "직원", "추가", "그때", "결정"}
+
+
+def person_names(entry: str) -> list[str]:
+    """담당자 항목("레몬 명지점 김철수 (실장)")에서 사람 이름(한글 3글자, 지점명·직함 제외)을 뽑는다"""
+    out = []
+    for t in re.findall(r"[가-힣]+", entry):
+        if len(t) == 3 and t not in NOT_NAME and not t.endswith(("점", "방")):
+            out.append(t)
+    return out
+
+
 def who(sender: str, room) -> str:
     s = norm(sender)
     if sender == "나" or any(h in s for h in HQ):
@@ -274,6 +287,8 @@ def who(sender: str, room) -> str:
     if len(s) <= 6 and any(sim(s[:3], h) >= 0.66 for h in HQ):   # 짧은 이름의 OCR 한 글자 오류 (예: 윤→유)
         return "hq"
     if any(sim(s, norm(m)) >= 0.7 or (len(norm(m)) >= 4 and norm(m) in s) for m in room["managers"]):
+        return "mgr"
+    if any(n in s for m in room["managers"] for n in person_names(m)):   # 지점명을 OCR이 틀리게 읽어도(명지점→영지점) 사람 이름으로 잡는다
         return "mgr"
     return "other"
 
@@ -355,6 +370,12 @@ def update_room(st, room, msgs):
         if q["no"] != room["no"] or q["status"] not in ("pending", "ask"):
             continue
         posted = dt.datetime.fromisoformat(q["posted"])
+        direct = next((m for m in msgs if who(m["sender"], room) == "hq" and not m["reply"] and not inquiry_of(m)
+                       and posted < m["at"] <= posted + dt.timedelta(minutes=10) and HQ_CONTACT.search(m["text"])
+                       and any(n in m["text"] for mm in room["managers"] for n in person_names(mm))), None)
+        if direct:                                         # 본사가 문의 직후 담당자에게 직접 연락했다고 남긴 글 ("홍길동 점장님께 유선 연락드렸습니다")
+            q["status"], q["note"] = "handled", f'본사 {direct["sender"]} 직접 연락 {direct["at"]:%m/%d %H:%M}'
+            continue
         for m in msgs:
             if m["at"] < posted or (m["at"] == posted and inquiry_of(m)) or not mentions(m["text"], q):
                 continue
