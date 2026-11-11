@@ -370,7 +370,10 @@ def update_room(st, room, msgs):
                                     "posted": m["at"].isoformat(timespec="minutes"),
                                     "due": due_time(m["at"]).isoformat(timespec="minutes"),
                                     "status": "pending", "note": ""}
-            log(f'새 문의 [{room["title"]}] {inq["kind"]} {inq["phone"]} {m["at"]:%m/%d %H:%M}')
+            if due_time(m["at"]) < NOW - STALE_AFTER:       # 이미 하루 넘게 지난 글: 기록만 하고 추적하지 않는다
+                st["inquiries"][iid]["status"], st["inquiries"][iid]["note"] = "old", "하루 넘게 지남(추적 안 함)"
+            else:
+                log(f'새 문의 [{room["title"]}] {inq["kind"]} {inq["phone"]} {m["at"]:%m/%d %H:%M}')
     for iid, q in st["inquiries"].items():
         if q["no"] != room["no"] or q["status"] not in ("pending", "ask"):
             continue
@@ -412,9 +415,14 @@ def update_room(st, room, msgs):
                 break
 
 
+STALE_AFTER = dt.timedelta(hours=24)
+
+
 def stale(st, q) -> bool:
-    """감시를 시작하기 전에 이미 기한이 지난 건 → 보내지 않고 보고만 한다"""
-    return dt.datetime.fromisoformat(q["due"]) < dt.datetime.fromisoformat(st["created"])
+    """추적하지 않을 건: 감시를 시작하기 전에 이미 기한이 지난 건, 또는 확인 기한이 지난 지 하루가 넘은 건
+    (하루 넘게 지난 문의는 이제 알려도 소용없다. 기준은 올린 시각이 아니라 기한이다 — 17시 이후·일요일 글은 기한이 다음 영업일이다)"""
+    due = dt.datetime.fromisoformat(q["due"])
+    return due < dt.datetime.fromisoformat(st["created"]) or due < NOW - STALE_AFTER
 
 
 def candidates(st, rooms):
@@ -455,9 +463,9 @@ def check(st, rooms, only=None):
     by_no = {r["no"]: r for r in rooms}
     due_rooms = {}
     for q in st["inquiries"].values():
-        if q["status"] == "pending" and stale(st, q):      # 감시 시작 전에 기한이 지난 건은 확인·전송하지 않는다
-            q["status"], q["note"] = "old", "감시 시작 전 기한 지남(안 보냄)"
-            log(f'시작 전 기한 지남 [{q["room"]}] {q["posted"]} {q["phone"]}')
+        if q["status"] in ("pending", "ask") and stale(st, q):   # 오래된 건은 확인·알림·전송하지 않는다
+            q["status"], q["note"] = "old", "하루 넘게 지남(추적 안 함)"
+            log(f'오래된 건 제외 [{q["room"]}] {q["posted"]} {q["phone"]}')
         if q["status"] not in ("pending", "ask"):
             continue
         if only is not None:
