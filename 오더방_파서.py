@@ -3,7 +3,12 @@
 import re
 import sys
 
-HEADER = re.compile(r"^\[레몬하우스\s*(.+?)\s*문의\]")
+HEADER = re.compile(r"^\[\s*레몬하우스\s*([^\]]*)\]?")   # '[레몬하우스'로 시작하는 글은 전부 추적 대상(제목에 '문의'가 없어도)
+
+
+def kind_of(m) -> str:
+    """제목 괄호 안의 종류. '견적 문의' → '견적', '사무실 상담' → '사무실상담', 비어 있으면 '기타'"""
+    return re.sub(r"문의$", "", m[1].replace(" ", "")) or "기타"
 FIELD = re.compile(r"^(현장.|평형대|전화번호|경로)\s*[:.•·\s]+\s*(.*)$")
 TIME = re.compile(r"^(?:\d\s+)?(오전|오후)\s*\d{1,2}:?\d{2}$")
 ADDR_END = re.compile(r"(특별시|광역시|도|시|군|구|읍|면|동|리|가|로|길|을)$")  # '을'은 OCR이 '읍'을 잘못 읽은 경우
@@ -40,7 +45,7 @@ def parse(lines):
             continue
         text = parts[2].strip()
         if m := HEADER.match(text):
-            cur, field = {"kind": m[1].replace(" ", ""), "phone": "", "site": "", "size": "", "time": ""}, None
+            cur, field = {"kind": kind_of(m), "phone": "", "site": "", "size": "", "time": ""}, None
             items.append(cur)
             continue
         if cur is None:
@@ -66,9 +71,10 @@ def parse(lines):
 def reminder(item, title: str = "점장님") -> str:
     """title: 오더방_목록.md의 호칭 칸. '' 또는 '(생략)'이면 호칭 없이 시작한다(담당자 2명 이상인 방)."""
     size = re.sub(r"\D", "", item["size"])
-    name = complex_name(item["site"]) + (f" {size}평" if size else "")
+    name = complex_name(item["site"]) + (f" {size}평" if size else "") if item["site"] else ""
     head = "" if title in ("", "(생략)") else f"{title}, "
-    return f"{head}[{name}] 문의건 통화하셨을까요? 피드백 부탁드립니다. (AI)"
+    what = f"[{name}] 문의건" if name else "위 문의건"          # 현장명이 없는 글(제목만 [레몬하우스…]인 공지성 글 등)
+    return f"{head}{what} 통화하셨을까요? 피드백 부탁드립니다. (AI)"
 
 
 if __name__ == "__main__":

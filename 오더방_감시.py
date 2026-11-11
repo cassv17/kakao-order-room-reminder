@@ -22,7 +22,7 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
-from 오더방_파서 import FIELD, HEADER, complex_name, reminder  # noqa: E402
+from 오더방_파서 import FIELD, HEADER, complex_name, kind_of, reminder  # noqa: E402
 
 STATE = BASE / "오더방_상태.json"
 PENDING = BASE / "오더방_보낼목록.json"
@@ -88,8 +88,11 @@ def load_rooms():
         if len(c) != 8 or not c[1].isdigit():
             continue
         mgr = re.sub(r"\([^)]*추가[^)]*\)", "", c[4])
-        rooms.append({"no": int(c[1]), "title": c[2], "managers": [m.strip() for m in mgr.split(" / ") if m.strip()],
-                      "honor": c[5], "watch": c[6] == "O"})
+        items = [m.strip() for m in mgr.split(" / ") if m.strip()]
+        # "게시자:홍길동 (대표님)" = 이 방에서 문의를 직접 올리는 사람(본사처럼 취급, 회신 의무 없음). 나머지가 회신해야 하는 담당자
+        posters = [m[len("게시자:"):].strip() for m in items if m.startswith("게시자:")]
+        rooms.append({"no": int(c[1]), "title": c[2], "managers": [m for m in items if not m.startswith("게시자:")],
+                      "posters": posters, "honor": c[5], "watch": c[6] == "O"})
     return rooms
 
 
@@ -187,7 +190,7 @@ def scan_list(rooms, pages: int, no_scroll=False):
             prev = next((t for x, yy, t in ls if 160 <= x <= 200 and 12 < yy - y <= 40), "")
             hm = HEADER.match(prev.strip())
             rows[r["title"]] = {"sig": f"{when}|{norm(prev)[:30]}", "when": when, "at": parse_when(when),
-                                "head": hm[1].replace(" ", "") if hm else ""}
+                                "head": kind_of(hm) if hm else ""}
     return rows
 
 
@@ -284,6 +287,8 @@ def who(sender: str, room) -> str:
     s = norm(sender)
     if sender == "나" or any(h in s for h in HQ):
         return "hq"
+    if any(n in s for p in room.get("posters", []) for n in person_names(p)):   # 이 방의 게시자(예: 직접 문의를 올리는 대표님)
+        return "hq"
     if len(s) <= 6 and any(sim(s[:3], h) >= 0.66 for h in HQ):   # 짧은 이름의 OCR 한 글자 오류 (예: 윤→유)
         return "hq"
     if any(sim(s, norm(m)) >= 0.7 or (len(norm(m)) >= 4 and norm(m) in s) for m in room["managers"]):
@@ -300,7 +305,7 @@ def inquiry_of(msg):
     if start is None:
         return None
     m = HEADER.match(msg["lines"][start])
-    item = {"kind": m[1].replace(" ", ""), "phone": "", "site": "", "size": ""}
+    item = {"kind": kind_of(m), "phone": "", "site": "", "size": ""}
     field = None
     for t in msg["lines"][start + 1:]:
         if f := FIELD.match(t):
@@ -351,7 +356,7 @@ def update_room(st, room, msgs):
     for i, m in enumerate(msgs):
         if who(m["sender"], room) != "hq" or not (inq := inquiry_of(m)):
             continue
-        ident = re.sub(r"\D", "", inq["phone"]) or norm(inq["site"])[:20]
+        ident = re.sub(r"\D", "", inq["phone"]) or norm(inq["site"])[:20] or f'{m["at"]:%H%M}'
         iid = f'{room["no"]}|{m["at"]:%Y-%m-%d}|{ident}'
         seen = NOW.isoformat(timespec="minutes")
         same = next((q for q in st["inquiries"].values() if same_inquiry(q, room, m["at"], inq)), None)
