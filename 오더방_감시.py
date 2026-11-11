@@ -393,6 +393,23 @@ def update_room(st, room, msgs):
                 break
             if w == "other":
                 q["status"], q["note"] = "ask", f'목록에 없는 사람 회신: {m["sender"]} {m["at"]:%m/%d %H:%M}'
+    # 목록에서 먼저 본 문의(seed)의 원문을 방에서 못 읽었어도(스캔 범위 맨 위에서 잘림 등), 그 뒤에 담당자가 아직 모르는 전화번호를 인용해
+    # 회신했다면 그 회신이 이 문의에 대한 것으로 본다 (예: 원문 09:33은 못 읽었지만 12:04에 점장이 그 번호로 회신)
+    known = [re.sub(r"\D", "", x["phone"]) for x in st["inquiries"].values() if x["no"] == room["no"] and x["phone"]]
+    for q in st["inquiries"].values():
+        if q["no"] != room["no"] or not q.get("seed") or q["status"] not in ("pending", "ask"):
+            continue
+        posted = dt.datetime.fromisoformat(q["posted"])
+        for m in msgs:
+            if not (m["reply"] and posted <= m["at"] <= posted + dt.timedelta(hours=12) and who(m["sender"], room) == "mgr"):
+                continue
+            nums = [re.sub(r"\D", "", r) for r in re.findall(r"0\d[\d\- .]{7,14}\d", m["text"])]
+            fresh = next((n for n in nums if len(n) >= 10 and not any(sim(n, k) >= 0.8 for k in known)), None)
+            if fresh:
+                q["status"], q["note"] = "replied", f'{m["sender"]} {m["at"]:%m/%d %H:%M} (원문은 못 읽고 인용 회신으로 확인)'
+                q["phone"] = q["phone"] or fresh
+                known.append(fresh)
+                break
 
 
 def stale(st, q) -> bool:
