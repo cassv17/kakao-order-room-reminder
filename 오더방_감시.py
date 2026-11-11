@@ -68,6 +68,48 @@ def notify(title: str, msg: str):
     log(f"알림({how}): {title} - {msg}")
 
 
+ALERT_CFG = BASE / "알림설정.json"
+
+
+def load_alert_cfg() -> dict:
+    """알림설정.json: {"선임톡방_테스트": true, "방": "선임톡방"} — 켜져 있으면 '회신 필요' 알림을 PC 알림 대신 그 카톡방에 남긴다"""
+    try:
+        return json.loads(ALERT_CFG.read_text(encoding="utf-8")) if ALERT_CFG.exists() else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def clean_room(title: str) -> str:
+    """방 이름에서 앞의 아이콘(🍋)과 보이지 않는 결합 문자를 뗀다"""
+    return re.sub(r"^[^가-힣A-Za-z0-9]+", "", title.replace("‍", "")).strip()
+
+
+def send_kakao(room: str, text: str) -> tuple[bool, str]:
+    p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(BASE / "카톡보내기.ps1"),
+                        "-Room", room, "-Text", text], capture_output=True, timeout=180, creationflags=NO_WINDOW)
+    out = p.stdout.decode("cp949", "replace").strip()
+    return (p.returncode == 0 and "전송함" in out), out
+
+
+def alert_to_room(st, fresh, room: str):
+    """회신이 필요한 문의를 '[오더방 미회신] 지점 방 이름 — 보낼 멘트'로 카톡방에 남긴다. 사용 중이면 다음 회차에 다시, 실패하면 PC 알림으로 대신한다."""
+    failed = []
+    for c in fresh:
+        text = f'[오더방 미회신] {clean_room(c["room"])} — {c["text"]}'
+        ok, out = send_kakao(room, text)
+        if ok:
+            log(f"{room}에 남김: {text}")
+            st["inquiries"][c["id"]]["notified"] = NOW.isoformat(timespec="minutes")
+        elif "사용 중" in out:
+            log(f"미룸({room} 전송): {out}")                    # notified를 안 찍어서 다음 회차에 다시 시도
+        else:
+            log(f"{room} 전송 실패: {out}")
+            st["inquiries"][c["id"]]["notified"] = NOW.isoformat(timespec="minutes")
+            failed.append(f'{clean_room(c["room"])}: {c["text"][:30]}')
+    if failed:
+        notify("오더방 알림을 카톡방에 못 남김", " / ".join(failed))
+
+
 def norm(s: str) -> str:
     return re.sub(r"[^가-힣a-zA-Z0-9]", "", s).lower()
 
@@ -585,8 +627,13 @@ def main():
     cands = candidates(st, rooms)
     fresh = [c for c in cands if not st["inquiries"][c["id"]].get("notified")]
     new_asks = [q for q in st["inquiries"].values() if q["status"] == "ask" and not q.get("notified")]
+    cfg = load_alert_cfg()
     if fresh and not a.auto:
-        notify(f"오더방 리마인드 {len(fresh)}건 확인 필요", " / ".join(f'{c["room"].lstrip("🍋 ")}: {c["text"][:30]}' for c in fresh))
+        if cfg.get("선임톡방_테스트"):                          # 시험 중: PC 알림 대신 카톡방에 지점 방 이름과 멘트를 남긴다
+            alert_to_room(st, fresh, cfg.get("방", "선임톡방"))
+            fresh = []
+        else:
+            notify(f"오더방 리마인드 {len(fresh)}건 확인 필요", " / ".join(f'{c["room"].lstrip("🍋 ")}: {c["text"][:30]}' for c in fresh))
     if new_asks:
         notify("오더방 확인 필요", " / ".join(f'{q["room"].lstrip("🍋 ")}: {q["note"]}' for q in new_asks))
     for c in fresh:
