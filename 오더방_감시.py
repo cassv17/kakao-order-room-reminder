@@ -33,6 +33,8 @@ CONFIG = BASE / "설정.json"
 def load_config() -> dict:
     """설정.json: 본사_이름 = 보낸 사람 이름에 들어 있으면 본사 직원으로 보는 이름들 (설정.예시.json 참고)"""
     if not CONFIG.exists():
+        if os.environ.get("ORDER_SETUP"):                   # 설치.py가 이 파일을 가져다 쓸 때: 아직 설정.json이 없다
+            return {"본사_이름": []}
         sys.exit("설정.json이 없습니다. 설정.예시.json을 복사해 설정.json으로 만들고 본사 직원 이름을 적으세요.")
     return json.loads(CONFIG.read_text(encoding="utf-8"))
 
@@ -84,6 +86,13 @@ def clean_room(title: str) -> str:
     return re.sub(r"^[^가-힣A-Za-z0-9]+", "", title.replace("‍", "")).strip()
 
 
+def branch_name(title: str) -> str:
+    """방 이름에서 지점명만 뽑는다: '🍋레몬 정관점' → '정관점', '🍋 광진구 오더방(김대표님)' → '광진구'"""
+    t = re.sub(r"^레몬\s*", "", clean_room(title))
+    m = re.match(r"(.*?점)(?=[\s(&/+]|$)", t)
+    return (m.group(1) if m else re.split(r"\s*오더방|\s*\(|\s*/", t)[0]).strip() or t
+
+
 def send_kakao(room: str, text: str) -> tuple[bool, str]:
     p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(BASE / "카톡보내기.ps1"),
                         "-Room", room, "-Text", text], capture_output=True, timeout=180, creationflags=NO_WINDOW)
@@ -95,7 +104,7 @@ def alert_to_room(st, fresh, room: str):
     """회신이 필요한 문의를 '[오더방 미회신] 지점 방 이름 — 보낼 멘트'로 카톡방에 남긴다. 사용 중이면 다음 회차에 다시, 실패하면 PC 알림으로 대신한다."""
     failed = []
     for c in fresh:
-        text = f'[오더방 미회신] {clean_room(c["room"])} — {c["text"]}'
+        text = f'(오더 미회신 모니터링) {branch_name(c["room"])} - {c["text"].replace(" (AI)", "").strip()}'   # 사용자 지정 형식 2026-11-12, (AI) 없음
         ok, out = send_kakao(room, text)
         if ok:
             log(f"{room}에 남김: {text}")
@@ -261,8 +270,11 @@ def page_messages(lines, top, bottom):
             if cur and cur["lines"]:
                 h = int(m[2]) % 12 + (12 if m[1] == "오후" else 0)
                 cur["time"] = dt.time(h, int(m[3]))
-                out.append(("msg", cur))
-                last_sender = cur["sender"]
+                if cur["sender"] is None:
+                    out.append(("tail", cur))              # 보낸 사람 줄이 화면 위로 잘림 → 다른 화면의 head와 이어 붙인다
+                else:
+                    out.append(("msg", cur))
+                    last_sender = cur["sender"]
             cur = None
             continue
         if re.fullmatch(r"\d{1,2}", t):                   # 안 읽은 사람 수
@@ -271,20 +283,57 @@ def page_messages(lines, top, bottom):
             if not cur or cur["sender"] != "나":
                 cur = {"sender": "나", "lines": [], "reply": False}
         elif cur is None:
-            if last_sender is None:
-                continue                                   # 위가 잘린 메시지
-            cur = {"sender": last_sender, "lines": [], "reply": False}
+            if last_sender is None:                        # 위가 잘린 메시지: 줄을 모아 두었다가 시각이 나오면 조각(tail)으로 내보낸다
+                cur = {"sender": None, "lines": [], "reply": False}
+            else:
+                cur = {"sender": last_sender, "lines": [], "reply": False}
         if "에게 답장" in t and not cur["lines"]:
             cur["reply"] = True
             continue
         cur["lines"].append(t)
+    if cur and cur["lines"] and cur["sender"] not in (None, "나"):
+        out.append(("head", cur))                          # 시각 줄이 화면 아래로 잘림 → 다른 화면의 tail과 이어 붙인다
+    return out
+
+
+def _same_line(a: str, b: str) -> bool:
+    na, nb = norm(a), norm(b)
+    return bool(na and nb) and (na == nb or sim(na, nb) >= 0.85)
+
+
+def stitch(merged):
+    """긴 글은 한 화면에 보낸 사람 줄과 시각 줄이 같이 안 잡힌다. 위쪽 화면의 head(보낸 사람+앞부분)와
+    아래쪽 화면의 tail(뒷부분+시각)을 겹치는 줄로 이어 붙여 하나의 메시지로 만든다. 못 이은 조각은 버린다."""
+    heads = [v for k, v in merged if k == "head"]
+    out = []
+    for kind, v in merged:
+        if kind == "head":
+            continue
+        if kind != "tail":
+            out.append((kind, v))
+            continue
+        best = None                                        # (겹친 줄 수, head, head 안 마지막 겹침 위치, tail 안 마지막 겹침 위치)
+        for h in heads:
+            pairs = [(i, j) for j, tl in enumerate(v["lines"]) for i, hl in enumerate(h["lines"]) if _same_line(tl, hl)]
+            if len(pairs) >= 2 and (best is None or len(pairs) > best[0]):
+                i, j = max(pairs, key=lambda ij: ij[1])
+                best = (len(pairs), h, i, j)
+        if best:
+            _, h, i, j = best
+            out.append(("msg", {"sender": h["sender"], "reply": h["reply"], "time": v["time"],
+                                "lines": h["lines"][:i + 1] + v["lines"][j + 1:]}))
     return out
 
 
 def scan_room(room, stop_date: dt.date, last_date: dt.date):
     """방을 읽어 날짜가 붙은 메시지 목록을 돌려준다(오래된 것부터)."""
+    return parse_scan(run_ps("-Action", "scan", "-Title", room["title"], "-StopDate", stop_date.isoformat(), "-MaxPages", "60"), last_date)
+
+
+def parse_scan(lines, last_date: dt.date):
+    """오더방_창.ps1 scan/probe 출력(M·P 줄) → 날짜가 붙은 메시지 목록 (설치.py도 쓴다)"""
     meta, pages = (0, 99999), {}
-    for line in run_ps("-Action", "scan", "-Title", room["title"], "-StopDate", stop_date.isoformat(), "-MaxPages", "60"):
+    for line in lines:
         if line.startswith("M\t"):
             _, a, b, _ = line.split("\t")
             meta = (int(a), int(b))
@@ -294,11 +343,12 @@ def scan_room(room, stop_date: dt.date, last_date: dt.date):
     merged, seen = [], set()
     for p in sorted(pages, reverse=True):                  # 가장 위 화면부터
         for kind, v in page_messages(pages[p], *meta):
-            key = ("d", v) if kind == "date" else (norm(v["sender"])[:6], v["time"], norm(" ".join(v["lines"][:2]))[:40])
+            key = ("d", v) if kind == "date" else (norm(v["sender"] or "")[:6], v.get("time"), kind, norm(" ".join(v["lines"][:2]))[:40])
             if key in seen:
                 continue
             seen.add(key)
             merged.append((kind, v))
+    merged = stitch(merged)
     has_date = any(k == "date" for k, _ in merged)
     cur = None if has_date else last_date
     msgs = []
@@ -629,7 +679,7 @@ def main():
     new_asks = [q for q in st["inquiries"].values() if q["status"] == "ask" and not q.get("notified")]
     cfg = load_alert_cfg()
     if fresh and not a.auto:
-        if cfg.get("선임톡방_테스트"):                          # 시험 중: PC 알림 대신 카톡방에 지점 방 이름과 멘트를 남긴다
+        if cfg.get("카톡방_알림", cfg.get("선임톡방_테스트")):                          # 시험 중: PC 알림 대신 카톡방에 지점 방 이름과 멘트를 남긴다
             alert_to_room(st, fresh, cfg.get("방", "선임톡방"))
             fresh = []
         else:

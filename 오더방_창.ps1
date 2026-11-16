@@ -7,12 +7,13 @@
   -Action scan  -Title "<방 제목>" -StopDate 2026-11-05 -MaxPages 12
       방을 (닫혀 있으면 열어서) 맨 아래로 내린 뒤 위로 올리며 OCR. StopDate 이하 날짜 구분선이 보이면 멈춘다.
       출력: M <listTop> <listBottom> <openedHere> / P <page> <x> <y> <text>
+  -Action probe -Title "<방 제목(근사값)>" -MaxPages 8   (설치용) scan과 같되 열린 창의 실제 제목을 'T <제목>' 줄로 먼저 낸다
 방을 열면 그 방은 읽음 처리된다. 직접 연 방은 화면 밖에서 읽고, 원래 위치로 되돌려 닫는다.
 #>
 param(
-  [Parameter(Mandatory)][ValidateSet('list', 'scan')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('list', 'scan', 'probe')][string]$Action,
   [Parameter(Mandatory)][string]$Out,
-  [string]$Title, [string]$StopDate, [int]$Pages = 2, [int]$MaxPages = 12,
+  [string]$Title, [string]$StopDate, [int]$Pages = 2, [int]$MaxPages = 12, [int]$Ticks = 1,
   [switch]$NoScroll,
   [string]$KeepDir   # 진단용: 캡처 이미지를 이 폴더에 남긴다
 )
@@ -93,8 +94,9 @@ try {
   else {
     if (-not $Title) { throw '-Title 필요' }
     $stop = if ($StopDate) { [datetime]::ParseExact($StopDate, 'yyyy-MM-dd', $null) } else { [datetime]::Today }
-    $room = Open-Room $Title $tmp
+    $room = Open-Room $Title $tmp -Probe:($Action -eq 'probe')
     $win = $room.Win
+    if ($Action -eq 'probe') { Emit "T`t$([KT]::Txt($win))"; $stop = [datetime]'2000-01-01' }   # 날짜 구분선으로 멈추지 않고 MaxPages까지 읽는다
     try {
       if ($room.OpenedHere) {
         # 화면 밖으로 옮겨진 창을 세로로 키워 긴 문의 글도 한 화면에 들어오게 한다 (닫을 때 Close-Room이 되돌림)
@@ -106,7 +108,7 @@ try {
       $wr = Get-Rect $win; $r = Get-Rect $lc
       $cx = [int](($r.L + $r.R) / 2); $cy = [int](($r.T + $r.B) / 2)
       $listH = $r.B - $r.T
-      $ticks = 1   # 한 칸(약 120px)씩만 올린다: 문의 글 하나가 500px 넘게 길 수 있어 큰 간격이면 어느 화면에도 통째로 안 들어오고, 날짜 구분선도 놓친다
+      $ticks = [Math]::Max(1, $Ticks)   # 한 칸(약 120px)씩만 올린다: 문의 글 하나가 500px 넘게 길 수 있어 큰 간격이면 어느 화면에도 통째로 안 들어오고, 날짜 구분선도 놓친다
       Emit "M`t$($r.T - $wr.T)`t$($r.B - $wr.T)`t$($room.OpenedHere)"
       [KT]::Wheel($lc, -120, 120, $cx, $cy); Start-Sleep -Milliseconds 700   # 맨 아래로
       $prev = $null

@@ -31,7 +31,7 @@ public class KT {
    orig = new KR(); var sw = System.Diagnostics.Stopwatch.StartNew();
    while (sw.ElapsedMilliseconds < timeoutMs) {
      foreach (var h in Tops(pid)) {
-       if (Array.IndexOf(before, (long)h) >= 0 || Txt(h) != title) continue;
+       if (Array.IndexOf(before, (long)h) >= 0 || (title != "*" && Txt(h) != title) || (title == "*" && Kids(h, "RICHEDIT").Count == 0)) continue;
        KR r; GetWindowRect(h, out r); orig = r;
        SetWindowPos(h, IntPtr.Zero, x, 0, r.R - r.L, r.B - r.T, 0x0014);
        return h;
@@ -144,7 +144,8 @@ function Get-Main {
 }
 function Get-ListView([IntPtr]$main) {
   $lv = @([KT]::Kids($main, 'EVA_Window') | Where-Object { [KT]::Txt($_) -like 'ChatRoomListView_*' })
-  if ($lv.Count -ne 1 -or -not [KT]::IsWindowVisible($lv[0])) { throw '메인 창이 채팅 탭이 아님' }
+  if ($lv.Count -ne 1) { throw '메인 창에서 채팅 목록을 찾지 못함' }
+  if (-not [KT]::IsWindowVisible($lv[0])) { throw '사용 중: 메인 창이 친구·더보기 등 다른 탭을 보고 있음 (채팅 탭으로 돌아오면 이어서 확인)' }
   $lv[0]
 }
 function Save-Print([IntPtr]$h, [string]$path) { # 가려진 창도 캡처
@@ -161,8 +162,12 @@ function Find-RoomWindows([string]$Title) { @(Get-Tops | Where-Object { [KT]::Tx
 # 방 창을 찾거나, 없으면 메인 창 검색으로 연다. → @{ Win; OpenedHere }
 # 검색 결과를 OCR로 읽어 제목이 가장 비슷한 줄을 더블클릭한다(첫 줄이 다른 방일 수 있음).
 # 열린 창 제목이 정확히 같지 않으면 닫고 실패한다.
-function Open-Room([string]$Title, [string]$TmpDir = $env:TEMP) {
-  $w = Find-RoomWindows $Title
+function Open-Room([string]$Title, [string]$TmpDir = $env:TEMP, [switch]$Probe) {
+  # -Probe: 설치 때 쓰는 모드. 제목이 근사값(OCR)이라 열린 창의 실제 제목을 모른다 → 비슷한 제목의 열린 창을 쓰거나, 새로 뜬 대화창을 그대로 받는다
+  if ($Probe) {
+    $w = @(Get-Tops | Where-Object { [KT]::Txt($_) -cne '카카오톡' -and [KT]::Sim([KT]::Norm([KT]::Txt($_)), [KT]::Norm($Title)) -ge 0.9 })
+    if ($w.Count -eq 1) { return @{ Win = $w[0]; OpenedHere = $false } }
+  } else { $w = Find-RoomWindows $Title }
   if ($w.Count -gt 1) { throw "'$Title' 창이 $($w.Count)개 열려 있음" }
   if ($w.Count -eq 1) { return @{ Win = $w[0]; OpenedHere = $false } }
   $main = Get-Main; $lv = Get-ListView $main
@@ -202,7 +207,7 @@ function Open-Room([string]$Title, [string]$TmpDir = $env:TEMP) {
     Add-Type -AssemblyName System.Windows.Forms
     $offx = [System.Windows.Forms.SystemInformation]::VirtualScreen.Right + 200
     $orect = New-Object KR
-    $hw = [KT]::WaitMove($script:kpid, $Title, [long[]]$before, 8000, $offx, [ref]$orect)
+    $hw = [KT]::WaitMove($script:kpid, $(if ($Probe) { '*' } else { $Title }), [long[]]$before, 8000, $offx, [ref]$orect)
     $ok = if ($hw -ne [IntPtr]::Zero) { @($hw) } else { @() }
     if ($ok.Count -eq 1) { $orig = $orect }
     Start-Sleep -Milliseconds 600
@@ -211,7 +216,7 @@ function Open-Room([string]$Title, [string]$TmpDir = $env:TEMP) {
   # 이번에 새로 뜬 창 중 목표가 아닌 엉뚱한 방은 닫는다.
   # 사용자가 같은 때 직접 연 창을 닫지 않도록, 입력칸이 '메시지 입력'(비어 있고 포커스 없음)인 대화창만 닫는다.
   $new = @(Get-Tops | Where-Object { $before -notcontains [long]$_ })
-  foreach ($h in ($new | Where-Object { [KT]::Txt($_) -cne $Title })) {
+  foreach ($h in ($new | Where-Object { if ($Probe) { $ok.Count -ne 1 -or $_ -ne $ok[0] } else { [KT]::Txt($_) -cne $Title } })) {
     $e = @([KT]::Kids($h, 'RICHEDIT'))
     if ($e.Count -eq 1 -and [KT]::Get($e[0]) -ceq '메시지 입력') { Close-Win $h }
   }
