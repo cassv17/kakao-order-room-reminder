@@ -40,7 +40,7 @@ def load_config() -> dict:
 
 
 HQ = load_config()["본사_이름"]   # OCR이 이름을 잘못 읽는 경우가 있으면 그 변형도 함께 적는다
-TIME = re.compile(r"^(?:\d+\s+)?(오전|오후)\s*(\d{1,2}):?(\d{2})$")
+TIME = re.compile(r"^(?:\d+\s+)?(오전|오후)\s*(\d{1,2})\s*[:•·.,;']?\s*(\d{2})$")   # OCR이 ':'를 '•'·'.' 등으로 읽는 일이 잦다 ('오후 1•26')
 DATE = re.compile(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일")
 NOW = dt.datetime.now()
 
@@ -327,14 +327,16 @@ def stitch(merged):
 
 def scan_room(room, stop_date: dt.date, last_date: dt.date):
     """방을 읽어 날짜가 붙은 메시지 목록을 돌려준다(오래된 것부터)."""
-    return parse_scan(run_ps("-Action", "scan", "-Title", room["title"], "-StopDate", stop_date.isoformat(), "-MaxPages", "60"), last_date)
+    return parse_scan(run_ps("-Action", "scan", "-Title", room["title"], "-StopDate", stop_date.isoformat(), "-MaxPages", "60"), last_date, stop_date)
 
 
-def parse_scan(lines, last_date: dt.date):
+def parse_scan(lines, last_date: dt.date, stop_date: dt.date | None = None):
     """오더방_창.ps1 scan/probe 출력(M·P 줄) → 날짜가 붙은 메시지 목록 (설치.py도 쓴다)"""
-    meta, pages = (0, 99999), {}
+    meta, pages, why = (0, 99999), {}, ""
     for line in lines:
-        if line.startswith("M\t"):
+        if line.startswith("E\t"):
+            why = line.split("\t")[1].strip()
+        elif line.startswith("M\t"):
             _, a, b, _ = line.split("\t")
             meta = (int(a), int(b))
         elif line.startswith("P\t"):
@@ -349,6 +351,9 @@ def parse_scan(lines, last_date: dt.date):
             seen.add(key)
             merged.append((kind, v))
     merged = stitch(merged)
+    dates = [v for k, v in merged if k == "date"]
+    if stop_date and why != "top" and (not dates or min(dates) > stop_date):   # 기준 날짜 구분선까지 못 읽었다 = 날짜가 틀어질 수 있는 불완전한 스캔
+        raise RuntimeError(f"방 스캔이 {stop_date:%m/%d} 날짜 구분선까지 닿지 못함 (읽은 화면 {len(pages)}개, 멈춘 이유 {why or '없음'}) — 다음 회차에 다시 읽음")
     has_date = any(k == "date" for k, _ in merged)
     cur = None if has_date else last_date
     msgs = []
@@ -357,6 +362,8 @@ def parse_scan(lines, last_date: dt.date):
             cur = v
         elif cur:
             v["at"] = dt.datetime.combine(cur, v["time"])
+            if v["at"] > NOW + dt.timedelta(minutes=10):   # 아직 오지 않은 시각 = 날짜 구분선·시각 OCR 오류 → 가짜 문의가 생기지 않게 버린다
+                continue
             v["text"] = "\n".join(v["lines"])
             msgs.append(v)
     return msgs
@@ -488,6 +495,18 @@ def update_room(st, room, msgs):
                 break
             if w == "other":
                 q["status"], q["note"] = "ask", f'목록에 없는 사람 회신: {m["sender"]} {m["at"]:%m/%d %H:%M}'
+        if q["status"] in ("pending", "ask"):              # 인용 없이 곧바로 이어 쓴 담당자 글("추후에 다시 연락 주신다고 합니다")도 직전 문의에 대한 회신으로 본다
+            def same_post(q, p, posted):                    # 직전 문의가 바로 이 문의인가 (연달아 올라온 문의를 헷갈리지 않게 전화번호로, 번호를 모르면 올린 시각(분)으로)
+                a, b = re.sub(r"\D", "", q["phone"]), re.sub(r"\D", "", inquiry_of(p)["phone"])
+                return sim(a, b) >= 0.8 if a and b else p["at"].replace(second=0, microsecond=0) == posted
+            def prev_inq(t):
+                c = [x for x in msgs if who(x["sender"], room) == "hq" and not x["reply"] and inquiry_of(x) and x["at"] <= t]
+                return max(c, key=lambda x: x["at"], default=None)
+            imp = next((m for m in msgs if who(m["sender"], room) == "mgr" and not m["reply"] and not inquiry_of(m)
+                        and posted < m["at"] <= posted + dt.timedelta(hours=12)
+                        and (p := prev_inq(m["at"])) and same_post(q, p, posted)), None)
+            if imp:
+                q["status"], q["note"] = "replied", f'{imp["sender"]} {imp["at"]:%m/%d %H:%M} (원문 인용 없이 이어 쓴 회신)'
     # 목록에서 먼저 본 문의(seed)의 원문을 방에서 못 읽었어도(스캔 범위 맨 위에서 잘림 등), 그 뒤에 담당자가 아직 모르는 전화번호를 인용해
     # 회신했다면 그 회신이 이 문의에 대한 것으로 본다 (예: 원문 09:33은 못 읽었지만 12:04에 점장이 그 번호로 회신)
     known = [re.sub(r"\D", "", x["phone"]) for x in st["inquiries"].values() if x["no"] == room["no"] and x["phone"]]
@@ -522,7 +541,7 @@ def candidates(st, rooms):
     out = []
     for iid, q in sorted(st["inquiries"].items(), key=lambda kv: kv[1]["posted"]):
         if (q["status"] == "pending" and dt.datetime.fromisoformat(q["due"]) <= NOW and not stale(st, q)
-                and q.get("seen")):                         # 화면을 못 읽었으면(잠금·빈 캡처) 보내지 않는다
+                and q.get("seen") == NOW.isoformat(timespec="minutes")):   # 이번 회차에 방을 열어 문의 글을 다시 확인한 건만. 미룸·실패로 방을 못 읽은 회차에는 지난번 확인 결과를 재사용하지 않는다
             out.append({"id": iid, "room": q["room"], "posted": q["posted"], "due": q["due"],
                         "phone": q["phone"], "site": q["site"], "text": reminder(q, honor.get(q["room"], "점장님"))})
     return out
@@ -640,6 +659,9 @@ def main():
     a = ap.parse_args()
     _lock = single_instance()  # noqa: F841
     rooms, st = load_rooms(), load_state()
+    if (last := st.get("last_run")) and (gap := NOW - dt.datetime.fromisoformat(last)) > dt.timedelta(minutes=30) and is_bday(NOW.date()):
+        log(f"이전 실행 후 {int(gap.total_seconds() // 60)}분 만에 재개 (PC 절전·꺼짐 가능) — 그 사이 올라온 회신은 이번 확인에서 읽는다")
+    st["last_run"] = NOW.isoformat(timespec="minutes")
     if a.send:
         items = json.loads(PENDING.read_text(encoding="utf-8")) if PENDING.exists() else []
         if a.ids:

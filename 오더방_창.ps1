@@ -111,10 +111,16 @@ try {
       $ticks = [Math]::Max(1, $Ticks)   # 한 칸(약 120px)씩만 올린다: 문의 글 하나가 500px 넘게 길 수 있어 큰 간격이면 어느 화면에도 통째로 안 들어오고, 날짜 구분선도 놓친다
       Emit "M`t$($r.T - $wr.T)`t$($r.B - $wr.T)`t$($room.OpenedHere)"
       [KT]::Wheel($lc, -120, 120, $cx, $cy); Start-Sleep -Milliseconds 700   # 맨 아래로
-      $prev = $null
+      $prev = $null; $why = 'max'
       for ($p = 1; $p -le $MaxPages; $p++) {
         $f = Save-Print $win (Join-Path $tmp "room_$p.png")
-        $h = Hash $f; if ($h -eq $prev) { break }; $prev = $h   # 맨 위에 닿음
+        $h = Hash $f
+        if ($h -eq $prev) {   # 같은 화면: 정말 맨 위일 수도, 스크롤이 아직 안 먹었을 수도 있다 → 조금 더 올려 한 번 더 확인
+          [KT]::Wheel($lc, 120, 3, $cx, $cy); Start-Sleep -Milliseconds 1000
+          $f = Save-Print $win (Join-Path $tmp "room_$p.png"); $h = Hash $f
+          if ($h -eq $prev) { $why = 'top'; break }   # 맨 위에 닿음
+        }
+        $prev = $h
         $hit = $false
         foreach ($l in (Invoke-Ocr $f)) {
           Emit "P`t$p`t$($l.X)`t$($l.Y)`t$($l.Text)"
@@ -122,9 +128,10 @@ try {
             try { if ((Get-Date -Year $matches[1] -Month $matches[2] -Day $matches[3]).Date -le $stop) { $hit = $true } } catch {}
           }
         }
-        if ($hit) { break }
+        if ($hit) { $why = 'stop'; break }
         [KT]::Wheel($lc, 120, $ticks, $cx, $cy); Start-Sleep -Milliseconds 700
       }
+      Emit "E`t$why"   # stop=기준 날짜 구분선까지 읽음 / top=방 맨 위까지 읽음 / max=MaxPages에서 멈춤(덜 읽음)
       [KT]::Wheel($lc, -120, 120, $cx, $cy)
     } finally {
       Close-Room $room
