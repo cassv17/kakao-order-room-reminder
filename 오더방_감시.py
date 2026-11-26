@@ -255,11 +255,14 @@ def page_messages(lines, top, bottom):
     for x, y, t in lines:
         t = t.strip()
         m = DATE.search(t)
-        if y < (top if m else lo) or y > bottom:          # 날짜 구분선은 공지 바로 아래에 걸려도 읽는다
+        if y < (top - 12 if m else lo) or y > bottom:     # 날짜 구분선은 공지 바로 아래나 목록 맨 윗줄에 걸려도 읽는다 (스캔이 거기서 멈춘다)
             continue
         if m:
             cur = None
-            out.append(("date", dt.date(int(m[1]), int(m[2]), int(m[3]))))
+            try:
+                out.append(("date", dt.date(int(m[1]), int(m[2]), int(m[3]))))
+            except ValueError:                             # 화면 가장자리에 반쯤 걸린 날짜 구분선을 틀리게 읽음('41월') → 다른 화면에서 온전히 읽힌다
+                pass
             continue
         if 78 <= x <= 89 and len(norm(t)) >= 3 and not TIME.match(t):   # 보낸 사람 줄
             cur = {"sender": re.sub(r"^0\s*", "", t), "lines": [], "reply": False}
@@ -286,7 +289,7 @@ def page_messages(lines, top, bottom):
             if last_sender is None:                        # 위가 잘린 메시지: 줄을 모아 두었다가 시각이 나오면 조각(tail)으로 내보낸다
                 cur = {"sender": None, "lines": [], "reply": False}
             else:
-                cur = {"sender": last_sender, "lines": [], "reply": False}
+                cur = {"sender": last_sender, "lines": [], "reply": False, "inherited": True}   # 보낸 사람 줄 없이 앞 글쓴이를 물려받음
         if "에게 답장" in t and not cur["lines"]:
             cur["reply"] = True
             continue
@@ -320,7 +323,7 @@ def stitch(merged):
                 best = (len(pairs), h, i, j)
         if best:
             _, h, i, j = best
-            out.append(("msg", {"sender": h["sender"], "reply": h["reply"], "time": v["time"],
+            out.append(("msg", {"sender": h["sender"], "reply": h["reply"], "time": v["time"], "inherited": h.get("inherited", False), "stitched": True,
                                 "lines": h["lines"][:i + 1] + v["lines"][j + 1:]}))
     return out
 
@@ -342,9 +345,12 @@ def parse_scan(lines, last_date: dt.date, stop_date: dt.date | None = None):
         elif line.startswith("P\t"):
             _, p, x, y, text = line.split("\t", 4)
             pages.setdefault(int(p), []).append((int(x), int(y), text))
-    merged, seen = [], set()
+    merged, seen, last = [], set(), None
     for p in sorted(pages, reverse=True):                  # 가장 위 화면부터
-        for kind, v in page_messages(pages[p], *meta):
+        found = page_messages(pages[p], *meta)
+        if p == min(pages) and found and found[-1][0] == "head":
+            last = found[-1][1]                            # 맨 아래 화면의 마지막 글인데 시각 줄을 못 읽음
+        for kind, v in found:
             key = ("d", v) if kind == "date" else (norm(v["sender"] or "")[:6], v.get("time"), kind, norm(" ".join(v["lines"][:2]))[:40])
             if key in seen:
                 continue
@@ -366,6 +372,12 @@ def parse_scan(lines, last_date: dt.date, stop_date: dt.date | None = None):
                 continue
             v["text"] = "\n".join(v["lines"])
             msgs.append(v)
+    # 맨 아래 글은 잘린 것이 아니라 OCR이 시각을 빠뜨린 것 → 버리면 회신이 없던 일이 된다. 직전 글 1분 뒤로 보고 회신 판정에만 쓴다
+    same = lambda a, b: norm(a["sender"])[:6] == norm(b["sender"])[:6] and norm(" ".join(a["lines"][:2]))[:40] == norm(" ".join(b["lines"][:2]))[:40]
+    if last and cur and not any(same(last, x) and x["at"].date() == cur for x in msgs if x.get("reply") == last["reply"]):
+        prev = msgs[-1]["at"] if msgs and msgs[-1]["at"].date() == cur else dt.datetime.combine(cur, dt.time())
+        if prev <= NOW:
+            msgs.append({**last, "at": prev + dt.timedelta(minutes=1), "text": chr(10).join(last["lines"]), "est": True})
     return msgs
 
 
@@ -463,6 +475,14 @@ def update_room(st, room, msgs):
             if same.get("seed"):                           # 목록에서 먼저 본 문의 → 방에서 읽은 내용으로 채운다
                 same.update(inq, seed=False)
             same["seen"] = seen
+            continue
+        if m.get("est"):                                   # 시각을 짐작한 글로는 새 문의를 만들지 않는다
+            continue
+        if (m.get("inherited") or m.get("stitched")) and any(   # 보낸 사람 줄을 못 읽었거나 잘린 담당자 답장이 인용문 때문에 새 문의로 보이는 것을 막는다
+                q["no"] == room["no"] and q["phone"] and inq["phone"]
+                and sim(re.sub(r"\D", "", q["phone"]), re.sub(r"\D", "", inq["phone"])) >= 0.8
+                and dt.timedelta() <= m["at"] - dt.datetime.fromisoformat(q["posted"]) <= dt.timedelta(days=7)   # 잘린 답장은 날짜가 하루 밀려 붙기도 한다
+                for q in st["inquiries"].values()):
             continue
         if iid not in st["inquiries"]:
             st["inquiries"][iid] = {**inq, "seen": seen, "room": room["title"], "no": room["no"],

@@ -154,8 +154,8 @@ function Save-Print([IntPtr]$h, [string]$path) { # 가려진 창도 캡처
   $g = [Drawing.Graphics]::FromImage($bmp); $dc = $g.GetHdc(); [void][KT]::PrintWindow($h, $dc, 2); $g.ReleaseHdc($dc)
   $bmp.Save($path); $g.Dispose(); $bmp.Dispose(); $path
 }
-function Invoke-Ocr([string]$path) { # → [pscustomobject]@{X;Y;Text}
-  & $script:OcrPs -Path $path | ForEach-Object { $a = $_ -split ' ', 3; if ($a.Count -eq 3) { [pscustomobject]@{ X = [int]$a[0]; Y = [int]$a[1]; Text = $a[2] } } }
+function Invoke-Ocr([string]$path, [double]$scale = 2.0) { # → [pscustomobject]@{X;Y;Text}
+  & $script:OcrPs -Path $path -Scale $scale | ForEach-Object { $a = $_ -split ' ', 3; if ($a.Count -eq 3) { [pscustomobject]@{ X = [int]$a[0]; Y = [int]$a[1]; Text = $a[2] } } }
 }
 function Find-RoomWindows([string]$Title) { @(Get-Tops | Where-Object { [KT]::Txt($_) -ceq $Title }) }
 

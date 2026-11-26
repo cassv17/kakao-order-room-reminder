@@ -45,6 +45,34 @@ function Assert-ChipTab([string]$png, [string]$dir) {
   if ($txt -notmatch '오더') { throw "사용 중: 메인 창이 전체·안읽음·오더방 탭이 아님 (선택된 탭: $txt)" }
 }
 function Emit([string]$s) { $lines.Add($s) }
+# Windows OCR은 확대 배율에 따라 줄 하나(말풍선 옆 시각, 보낸 사람 줄 등)를 통째로 빠뜨리는 일이 있다 → 두 배율로 읽어 빠진 줄을 보탠다.
+# 글자 조각이 섞이지 않게, 첫 배율에 없는 높이의 줄과 시각 줄만 보탠다
+function Invoke-RoomOcr([string]$png) {
+  $all = @(Invoke-Ocr $png)
+  $time = '^(\d+\s+)?(오전|오후)\s*\d{1,2}\s*\D?\s*\d{2}$'
+  foreach ($b in @(Invoke-Ocr $png 1.5)) {
+    $same = @(if ($b.Text -match $time) { @($all | Where-Object { $_.Text -match $time -and [Math]::Abs($_.Y - $b.Y) -le 12 }) }
+            else { @($all | Where-Object { [Math]::Abs($_.Y - $b.Y) -le 7 }) })   # 바깥 @()가 없으면 5.1에서 1건의 Count가 비어 중복이 들어간다
+    if (-not $same.Count) { $all += $b }
+  }
+  $all
+}
+# 창을 키운 직후에는 대화 목록 아래쪽이 하얗게 빈 채 찍히기도 한다 (왼쪽 가장자리: 가운데는 배경색인데 맨 아래만 순백)
+function Test-Unpainted([string]$png, [int]$top, [int]$bottom) {
+  $bmp = [Drawing.Bitmap]::FromFile($png)
+  try {
+    $w = @(($bottom - 4), [int](($top + $bottom) / 2) | ForEach-Object { $c = $bmp.GetPixel(6, $_); $c.R -gt 250 -and $c.G -gt 250 -and $c.B -gt 250 })
+    $w[0] -and -not $w[1]
+  } finally { $bmp.Dispose() }
+}
+function Save-Room([IntPtr]$h, [string]$png, [int]$top, [int]$bottom) {
+  for ($k = 0; $k -lt 8; $k++) {
+    $f = Save-Print $h $png
+    if (-not (Test-Unpainted $f $top $bottom)) { return $f }
+    Start-Sleep -Milliseconds 500
+  }
+  throw '방 화면 아래쪽이 다 그려지지 않음 — 다음 회차에 다시 읽음'
+}
 function Hash([string]$p) { $b = [IO.File]::ReadAllBytes($p); [BitConverter]::ToString((New-Object Security.Cryptography.MD5CryptoServiceProvider).ComputeHash($b)) }
 
 try {
@@ -113,7 +141,8 @@ try {
       [KT]::Wheel($lc, -120, 120, $cx, $cy); Start-Sleep -Milliseconds 700   # 맨 아래로
       $prev = $null; $why = 'max'
       for ($p = 1; $p -le $MaxPages; $p++) {
-        $f = Save-Print $win (Join-Path $tmp "room_$p.png")
+        $png = Join-Path $tmp "room_$p.png"
+        $f = if ($p -eq 1) { Save-Room $win $png ($r.T - $wr.T) ($r.B - $wr.T) } else { Save-Print $win $png }   # 첫 화면(맨 아래)은 다 그려진 것만 쓴다
         $h = Hash $f
         if ($h -eq $prev) {   # 같은 화면: 정말 맨 위일 수도, 스크롤이 아직 안 먹었을 수도 있다 → 조금 더 올려 한 번 더 확인
           [KT]::Wheel($lc, 120, 3, $cx, $cy); Start-Sleep -Milliseconds 1000
@@ -122,7 +151,7 @@ try {
         }
         $prev = $h
         $hit = $false
-        foreach ($l in (Invoke-Ocr $f)) {
+        foreach ($l in (Invoke-RoomOcr $f)) {
           Emit "P`t$p`t$($l.X)`t$($l.Y)`t$($l.Text)"
           if ($l.Text -match '(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일') {
             try { if ((Get-Date -Year $matches[1] -Month $matches[2] -Day $matches[3]).Date -le $stop) { $hit = $true } } catch {}
